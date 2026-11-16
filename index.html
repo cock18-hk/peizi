@@ -110,7 +110,7 @@
   <button type="button" data-script="hans" aria-pressed="false">简体</button>
 </div>
 <h1>配字</h1>
-<p class="sub">輸入一個常用字。周圍有八個字，都可以配上圖上已有的字，散開來放。每配成一個詞，還沒選的字整組換新，仍然是八個，也是圍著散開。配詞不夠多的字，就把能配的都搜出來。從起首的字可以配到第五層。後生出的字，也可以配前面已經出現的字，次序倒過來也算。拖到哪個字上，那個字會放大，配的就是那一個。再輸入同一個字，會換一組。</p>
+<p class="sub">輸入一個常用字。周圍有八個字，四個配得上圖上已有的字，四個配不上，散開來放。每配成一個詞，還沒選的字整組換新，仍然是八個，四個配得上，四個配不上，也是圍著散開。配詞不夠多的字，就把能配的都搜出來。從起首的字可以配到第五層。後生出的字，也可以配前面已經出現的字，次序倒過來也算。拖到哪個字上，那個字會放大，配的就是那一個。再輸入同一個字，會換一組。</p>
 <p class="key"><i class="swatch front"></i><span id="k-front">前面的字</span><i class="swatch back"></i><span id="k-back">後面的字</span><i class="swatch loose"></i><span id="k-loose">還沒配的字</span></p>
 <p class="rule">詞語是兩個常用字固定合成一個意思，可以單獨放進一句話。兩個字只是剛好排在一起，例如「我去」，不算詞語。</p>
 <form id="ask">
@@ -3223,14 +3223,47 @@ function renewChoices() {
     });
   });
   const last = ((seenMem["#board"] || []).slice(-1)[0]) || "";
+  const want = Math.min(4, pool.length);
   let pick = [];
   for (let t = 0; t < 24; t++) {
-    const candidate = shuffle(pool.filter(p => p.deep)).concat(shuffle(pool.filter(p => !p.deep))).slice(0, Math.min(8, pool.length));
-    const sig = candidate.map(p => p.c).slice().sort().join("");
+    const candidate = shuffle(pool.filter(p => p.deep)).concat(shuffle(pool.filter(p => !p.deep))).slice(0, want);
     if (!pick.length) pick = candidate;
-    if (sig && sig !== last) { pick = candidate; break; }
+    const sig = candidate.map(p => p.c).slice().sort().join("") + "|";
+    if (candidate.length && !last.startsWith(sig)) { pick = candidate; break; }
   }
-  seenMem["#board"] = (seenMem["#board"] || []).concat([pick.map(p => p.c).slice().sort().join("")]).slice(-12);
+  const paired = new Set(pick.map(p => p.c));
+  const alphabet = new Set();
+  Object.keys(DICT).forEach(k => {
+    alphabet.add(k);
+    (DICT[k] || []).forEach(e => alphabet.add(e.c));
+  });
+  [...DECOY_SRC].forEach(c => alphabet.add(script === "hans" ? toHans(c) : c));
+  const loosePool = [];
+  alphabet.forEach(c => {
+    if (!c || [...c].length !== 1 || onBoard.has(c) || paired.has(c)) return;
+    if (hosts.some(h => canPairWith(h, c))) return;
+    if (pick.some(p => canPairWith(p.c, c))) return;
+    loosePool.push(c);
+  });
+  const takeLoose = (list) => {
+    const got = [];
+    list.forEach(c => {
+      if (got.length >= 4) return;
+      if (got.some(d => canPairWith(d, c))) return;
+      got.push(c);
+    });
+    return got;
+  };
+  let decoys = [];
+  const pairSig = pick.map(p => p.c).slice().sort().join("");
+  for (let t = 0; t < 24; t++) {
+    const candidate = takeLoose(shuffle(loosePool));
+    if (candidate.length > decoys.length) decoys = candidate;
+    const sig = pairSig + "|" + candidate.slice().sort().join("");
+    if (candidate.length === 4 && sig !== last) { decoys = candidate; break; }
+  }
+  if (decoys.length < 4) decoys = takeLoose(shuffle(loosePool));
+  seenMem["#board"] = (seenMem["#board"] || []).concat([pairSig + "|" + decoys.slice().sort().join("")]).slice(-12);
   saveSeen();
   pick.forEach(item => {
     const open = item.hosts.filter(h => (nodes[h].layer || 1) < 5);
@@ -3238,7 +3271,11 @@ function renewChoices() {
     const host = choices[Math.floor(Math.random() * choices.length)];
     nodes[host].deal.push({ c: item.c, g: "", front: false });
   });
-  return pick.length;
+  if (decoys.length && hosts.length) {
+    const home = hosts[Math.floor(Math.random() * hosts.length)];
+    nodes[home].decoys = decoys;
+  }
+  return { pair: pick.length, loose: decoys.length };
 }
 function angDist(a, b) {
   let d = Math.abs(a - b) % (Math.PI * 2);
@@ -3318,11 +3355,7 @@ function chipSpots(id, avoid) {
   const node = nodes[id];
   if (!node || !node.deal) return [];
   const pending = node.deal.filter(e => !nodes[e.c]).map(e => e.c);
-  const decoys = (node.decoys || []).filter(c => {
-    if (nodes[c] || pending.includes(c)) return false;
-    if (pending.length) return true;
-    return Object.keys(nodes).some(k => canPairWith(k, c));
-  });
+  const decoys = (node.decoys || []).filter(c => !nodes[c] && !pending.includes(c));
   const chars = pending.concat(decoys);
   if (!chars.length) return [];
   chars.sort((a, b) => hash(id + ":" + a) - hash(id + ":" + b));
@@ -3575,7 +3608,8 @@ function commit(steps) {
   });
   if (!done.length) return false;
   const fresh = renewChoices();
-  if (fresh) lines.push("換了" + zhCount(fresh) + (script === "hans" ? "个" : "個") + "字，都可以配上圖上已有的字。");
+  const again = handLine(fresh.pair, fresh.loose, "");
+  if (again) lines.push("換了" + again);
   msg(lines.join(""));
   render();
   return true;
@@ -3848,10 +3882,7 @@ function placeSeed(ch, note) {
   document.getElementById("world").hidden = false;
   document.getElementById("reset").hidden = false;
   document.body.classList.add("playing");
-  const unit = script === "hans" ? "个" : "個";
-  const lead = shown
-    ? zhCount(shown) + unit + "字，都可以配上圖上的字。拖上去試試。"
-    : t("leadFew");
+  const lead = handLine(shown.pair, shown.loose, script === "hans" ? "拖上去试试。" : "拖上去試試。");
   msg((note ? note + "。" : "") + (again ? t("again") : "") + lead);
   render();
   requestAnimationFrame(fitView);
@@ -3882,7 +3913,7 @@ document.getElementById("reset").onclick = () => {
 };
 const COPY = {
   hant: {
-    sub: "輸入一個常用字。周圍有八個字，都可以配上圖上已有的字，散開來放。每配成一個詞，還沒選的字整組換新，仍然是八個，也是圍著散開。配詞不夠多的字，就把能配的都搜出來。從起首的字可以配到第五層。後生出的字，也可以配前面已經出現的字，次序倒過來也算。拖到哪個字上，那個字會放大，配的就是那一個。再輸入同一個字，會換一組。",
+    sub: "輸入一個常用字。周圍有八個字，四個配得上圖上已有的字，四個配不上，散開來放。每配成一個詞，還沒選的字整組換新，仍然是八個，四個配得上，四個配不上，也是圍著散開。配詞不夠多的字，就把能配的都搜出來。從起首的字可以配到第五層。後生出的字，也可以配前面已經出現的字，次序倒過來也算。拖到哪個字上，那個字會放大，配的就是那一個。再輸入同一個字，會換一組。",
     front: "前面的字", back: "後面的字", loose: "還沒配的字",
     rule: "詞語是兩個常用字固定合成一個意思，可以單獨放進一句話。兩個字只是剛好排在一起，例如「我去」，不算詞語。",
     label: "你們已經認識的一個字", go: "放在中間",
@@ -3895,7 +3926,7 @@ const COPY = {
     leadFew: "這個字配詞不多，能配的都出了。拖上去試試。"
   },
   hans: {
-    sub: "输入一个常用字。周围有八个字，都可以配上图上已有的字，散开来放。每配成一个词，还没选的字整组换新，仍然是八个，也是围着散开。配词不够多的字，就把能配的都搜出来。从起首的字可以配到第五层。后生出的字，也可以配前面已经出现的字，次序倒过来也算。拖到哪个字上，那个字会放大，配的就是那一个。再输入同一个字，会换一组。",
+    sub: "输入一个常用字。周围有八个字，四个配得上图上已有的字，四个配不上，散开来放。每配成一个词，还没选的字整组换新，仍然是八个，四个配得上，四个配不上，也是围着散开。配词不够多的字，就把能配的都搜出来。从起首的字可以配到第五层。后生出的字，也可以配前面已经出现的字，次序倒过来也算。拖到哪个字上，那个字会放大，配的就是那一个。再输入同一个字，会换一组。",
     front: "前面的字", back: "后面的字", loose: "还没配的字",
     rule: "词语是两个常用字固定合成一个意思，可以单独放进一句话。两个字只是刚好排在一起，例如「我去」，不算词语。",
     label: "你们已经认识的一个字", go: "放在中间",
@@ -3908,6 +3939,12 @@ const COPY = {
     leadFew: "这个字配词不多，能配的都出了。拖上去试试。"
   }
 };
+function handLine(pair, loose, drag) {
+  const unit = script === "hans" ? "个" : "個";
+  const n = pair + loose;
+  if (!n) return drag ? t("leadFew") : "";
+  return zhCount(n) + unit + "字，" + zhCount(pair) + unit + "配得上，" + zhCount(loose) + unit + "配不上。" + (drag || "");
+}
 function zhCount(n) {
   const d = script === "hans"
     ? ["零", "一", "两", "三", "四", "五", "六", "七", "八", "九", "十"]
