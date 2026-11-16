@@ -110,7 +110,7 @@
   <button type="button" data-script="hans" aria-pressed="false">简体</button>
 </div>
 <h1>配字</h1>
-<p class="sub">輸入一個常用字。旁邊有八個字，配得成的和配不成的混在一起。配詞不夠多的字，也把能配的都搜出來。每配成一個字，再出至少八個不同的字。從起首的字可以配到第五層。後生出的字，也可以配前面已經出現的字，次序倒過來也算。拖到哪個字上，那個字會放大，配的就是那一個。再輸入同一個字，會換一組。</p>
+<p class="sub">輸入一個常用字。周圍有八個字，都可以配上圖上已有的字，散開來放。每配成一個詞，還沒選的字整組換新，仍然是八個，也是圍著散開。配詞不夠多的字，就把能配的都搜出來。從起首的字可以配到第五層。後生出的字，也可以配前面已經出現的字，次序倒過來也算。拖到哪個字上，那個字會放大，配的就是那一個。再輸入同一個字，會換一組。</p>
 <p class="key"><i class="swatch front"></i><span id="k-front">前面的字</span><i class="swatch back"></i><span id="k-back">後面的字</span><i class="swatch loose"></i><span id="k-loose">還沒配的字</span></p>
 <p class="rule">詞語是兩個常用字固定合成一個意思，可以單獨放進一句話。兩個字只是剛好排在一起，例如「我去」，不算詞語。</p>
 <form id="ask">
@@ -3199,21 +3199,46 @@ function pickDecoys(char, need) {
   saveSeen();
   return pick;
 }
-function giveDeal(char) {
-  const n = nodes[char];
-  if (!n) return false;
-  const kept = (n.decoys || []).filter(c => !nodes[c] && Object.keys(nodes).some(k => k !== char && canPairWith(k, c)));
-  const pick = dealValid(char, n.layer || 1);
-  n.deal = pick;
-  const needWrong = pick.length ? Math.max(1, 8 - pick.length) : 0;
-  const fresh = needWrong ? pickDecoys(char, needWrong) : [];
-  const decoys = [];
-  fresh.concat(kept).forEach(c => {
-    if (nodes[c] || decoys.includes(c) || pick.some(e => e.c === c)) return;
-    decoys.push(c);
+function renewChoices() {
+  const hosts = Object.keys(nodes);
+  hosts.forEach(id => {
+    const n = nodes[id];
+    n.deal = (n.deal || []).filter(e => nodes[e.c]);
+    n.decoys = [];
   });
-  n.decoys = decoys;
-  return pick.length > 0 && decoys.length > 0 && pick.length + decoys.length >= 8;
+  const onBoard = new Set(hosts);
+  const pool = [];
+  hosts.forEach(host => {
+    const layer = nodes[host].layer || 1;
+    const need = layer < 5 ? 5 - layer : 0;
+    allPartners(host).forEach(e => {
+      if (onBoard.has(e.c)) return;
+      let item = pool.find(p => p.c === e.c);
+      if (!item) {
+        item = { c: e.c, hosts: [], deep: false };
+        pool.push(item);
+      }
+      if (!item.hosts.includes(host)) item.hosts.push(host);
+      if (need && (SPAN[e.c] || 1) >= need) item.deep = true;
+    });
+  });
+  const last = ((seenMem["#board"] || []).slice(-1)[0]) || "";
+  let pick = [];
+  for (let t = 0; t < 24; t++) {
+    const candidate = shuffle(pool.filter(p => p.deep)).concat(shuffle(pool.filter(p => !p.deep))).slice(0, Math.min(8, pool.length));
+    const sig = candidate.map(p => p.c).slice().sort().join("");
+    if (!pick.length) pick = candidate;
+    if (sig && sig !== last) { pick = candidate; break; }
+  }
+  seenMem["#board"] = (seenMem["#board"] || []).concat([pick.map(p => p.c).slice().sort().join("")]).slice(-12);
+  saveSeen();
+  pick.forEach(item => {
+    const open = item.hosts.filter(h => (nodes[h].layer || 1) < 5);
+    const choices = open.length ? open : item.hosts;
+    const host = choices[Math.floor(Math.random() * choices.length)];
+    nodes[host].deal.push({ c: item.c, g: "", front: false });
+  });
+  return pick.length;
 }
 function angDist(a, b) {
   let d = Math.abs(a - b) % (Math.PI * 2);
@@ -3428,6 +3453,41 @@ function curve(a, b, bend, spots, ends) {
   const cy = my + (cdx / clen) * bowAmt;
   return `M ${ax} ${ay} Q ${cx} ${cy} ${bx} ${by}`;
 }
+function spreadChoices(spots) {
+  if (spots.length < 2) return;
+  const ids = Object.keys(nodes);
+  if (!ids.length) return;
+  let cx = 0, cy = 0;
+  ids.forEach(id => { cx += nodes[id].x; cy += nodes[id].y; });
+  cx /= ids.length;
+  cy /= ids.length;
+  let far = 0;
+  ids.forEach(id => { far = Math.max(far, Math.hypot(nodes[id].x - cx, nodes[id].y - cy)); });
+  far = Math.max(260, far + 250);
+  const count = spots.length;
+  let bestOff = 0, bestScore = -Infinity;
+  for (let s = 0; s < 24; s++) {
+    const off = (s / 24) * Math.PI * 2;
+    let score = 0;
+    for (let i = 0; i < count; i++) {
+      const ang = off + ((i + 0.5) / count) * Math.PI * 2;
+      const x = cx + Math.cos(ang) * far;
+      const y = cy + Math.sin(ang) * far;
+      ids.forEach(id => {
+        const d = Math.hypot(nodes[id].x - x, nodes[id].y - y);
+        if (d < 210) score -= 210 - d;
+      });
+    }
+    if (score > bestScore) { bestScore = score; bestOff = off; }
+  }
+  spots.forEach((spot, i) => {
+    const j = rnd(hash("散" + spot.char));
+    const ang = bestOff + ((i + 0.5) / count) * Math.PI * 2;
+    const rad = far + (j - 0.5) * 20;
+    spot.x = cx + Math.cos(ang) * rad;
+    spot.y = cy + Math.sin(ang) * rad;
+  });
+}
 function separateSpots(spots) {
   const gap = 90;
   for (let pass = 0; pass < 8; pass++) {
@@ -3498,15 +3558,10 @@ function attach(link) {
     deal: [],
     decoys: []
   };
-  const ready = giveDeal(char);
-  let moreRound = false;
-  if (!(nodes[id].deal || []).some(e => !nodes[e.c])) moreRound = giveDeal(id);
   return {
     word: link.word,
     gloss: link.gloss,
-    more: stillPairs(char),
-    ready: ready,
-    moreRound: moreRound && !ready
+    more: stillPairs(char)
   };
 }
 function commit(steps) {
@@ -3516,9 +3571,11 @@ function commit(steps) {
     const step = attach(link);
     if (!step) return;
     done.push(link);
-    lines.push(step.word + "。" + step.gloss + (step.more ? "。這個字還有配詞。" : "。") + (step.ready ? "又生出至少八個不同的字。" : "") + (step.moreRound ? "這裡又生出新的字。" : ""));
+    lines.push(step.word + "。" + step.gloss + (step.more ? "。這個字還有配詞。" : "。"));
   });
   if (!done.length) return false;
+  const fresh = renewChoices();
+  if (fresh) lines.push("換了" + zhCount(fresh) + (script === "hans" ? "个" : "個") + "字，都可以配上圖上已有的字。");
   msg(lines.join(""));
   render();
   return true;
@@ -3556,6 +3613,7 @@ function render() {
       spots.push(spot);
     });
   });
+  spreadChoices(spots);
   separateSpots(spots);
   const lines = Object.keys(nodes).filter(id => nodes[id].parent).map(id => {
     const a = nodes[nodes[id].parent], b = nodes[id];
@@ -3785,13 +3843,15 @@ function placeSeed(ch, note) {
   nodes = {};
   const again = (seenMem[ch] || []).length > 0;
   nodes[ch] = { parent: null, x: CX, y: CY, bend: 0, tilt: 0, gloss: "", fresh: false, layer: 1, deal: [], decoys: [] };
-  giveDeal(ch);
+  const shown = renewChoices();
   document.getElementById("ask").hidden = true;
   document.getElementById("world").hidden = false;
   document.getElementById("reset").hidden = false;
   document.body.classList.add("playing");
-  const nRight = (nodes[ch].deal || []).length;
-  const lead = nRight >= 4 ? t("lead4") : t("leadFew");
+  const unit = script === "hans" ? "个" : "個";
+  const lead = shown
+    ? zhCount(shown) + unit + "字，都可以配上圖上的字。拖上去試試。"
+    : t("leadFew");
   msg((note ? note + "。" : "") + (again ? t("again") : "") + lead);
   render();
   requestAnimationFrame(fitView);
@@ -3822,7 +3882,7 @@ document.getElementById("reset").onclick = () => {
 };
 const COPY = {
   hant: {
-    sub: "輸入一個常用字。旁邊有八個字，配得成的和配不成的混在一起。配詞不夠多的字，也把能配的都搜出來。每配成一個字，再出至少八個不同的字。從起首的字可以配到第五層。後生出的字，也可以配前面已經出現的字，次序倒過來也算。拖到哪個字上，那個字會放大，配的就是那一個。再輸入同一個字，會換一組。",
+    sub: "輸入一個常用字。周圍有八個字，都可以配上圖上已有的字，散開來放。每配成一個詞，還沒選的字整組換新，仍然是八個，也是圍著散開。配詞不夠多的字，就把能配的都搜出來。從起首的字可以配到第五層。後生出的字，也可以配前面已經出現的字，次序倒過來也算。拖到哪個字上，那個字會放大，配的就是那一個。再輸入同一個字，會換一組。",
     front: "前面的字", back: "後面的字", loose: "還沒配的字",
     rule: "詞語是兩個常用字固定合成一個意思，可以單獨放進一句話。兩個字只是剛好排在一起，例如「我去」，不算詞語。",
     label: "你們已經認識的一個字", go: "放在中間",
@@ -3831,11 +3891,11 @@ const COPY = {
     drag: "拖到已經在圖上的字。", need: "請輸入一個字。",
     none: "這個字在詞庫裡還沒有配詞。請試生、明、行、水、人。",
     first: "用第一個字：", again: "這次換了另一組。",
-    lead4: "八個字，四個可以配成詞。拖上去試試。",
+    lead4: "四個字，三個可以配成詞。拖上去試試。",
     leadFew: "這個字配詞不多，能配的都出了。拖上去試試。"
   },
   hans: {
-    sub: "输入一个常用字。旁边有八个字，配得成的和配不成的混在一起。配词不够多的字，也把能配的都搜出来。每配成一个字，再出至少八个不同的字。从起首的字可以配到第五层。后生出的字，也可以配前面已经出现的字，次序倒过来也算。拖到哪个字上，那个字会放大，配的就是那一个。再输入同一个字，会换一组。",
+    sub: "输入一个常用字。周围有八个字，都可以配上图上已有的字，散开来放。每配成一个词，还没选的字整组换新，仍然是八个，也是围着散开。配词不够多的字，就把能配的都搜出来。从起首的字可以配到第五层。后生出的字，也可以配前面已经出现的字，次序倒过来也算。拖到哪个字上，那个字会放大，配的就是那一个。再输入同一个字，会换一组。",
     front: "前面的字", back: "后面的字", loose: "还没配的字",
     rule: "词语是两个常用字固定合成一个意思，可以单独放进一句话。两个字只是刚好排在一起，例如「我去」，不算词语。",
     label: "你们已经认识的一个字", go: "放在中间",
@@ -3844,10 +3904,16 @@ const COPY = {
     drag: "拖到已经在图上的字。", need: "请输入一个字。",
     none: "这个字在词库里还没有配词。请试生、明、行、水、人。",
     first: "用第一个字：", again: "这次换了另一组。",
-    lead4: "八个字，四个可以配成词。拖上去试试。",
+    lead4: "四个字，三个可以配成词。拖上去试试。",
     leadFew: "这个字配词不多，能配的都出了。拖上去试试。"
   }
 };
+function zhCount(n) {
+  const d = script === "hans"
+    ? ["零", "一", "两", "三", "四", "五", "六", "七", "八", "九", "十"]
+    : ["零", "一", "兩", "三", "四", "五", "六", "七", "八", "九", "十"];
+  return n >= 0 && n < d.length ? d[n] : String(n);
+}
 function t(key) { return COPY[script][key]; }
 function applyCopy() {
   const c = COPY[script];
